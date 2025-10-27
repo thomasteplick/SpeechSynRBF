@@ -21,7 +21,7 @@ const (
 	tol           = 0.001         // K iteration stopping criteria
 	dataDir       = "../rbf/data" // directory for the weights and synthetic speech files
 	kmeans        = "kmeans.csv"  // file for k-means
-	maxIterations = 50            // maximum iterations for reassigning clusters and updating centroids
+	maxIterations = 100           // maximum iterations for reassigning clusters and updating centroids
 )
 
 type Cluster struct {
@@ -55,6 +55,9 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 	for m := 0; m <= centr; m++ {
 		sum := make([]float64, centrDim)
 		count := 0
+		if centr == 63 {
+			fmt.Printf("centroid=%d, ", m)
+		}
 		// loop over data in this cluster
 		for n := range dataLen {
 			if cl.dataCluster[n] == m {
@@ -63,6 +66,9 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 				}
 				count++
 			}
+		}
+		if centr == 63 {
+			fmt.Printf("count=%d\n", count)
 		}
 		// new centroid location
 		for i := range cl.centroids[m] {
@@ -75,24 +81,36 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 // Compute a common bandwidth for the RBFs
 func (cl *Cluster) computeRBFbandwidth(ncentroids int) {
 	// overfit if bw too small, underfit if too large
-	// use twice the average distance between all the centroids as the bandwidth
-	sum := 0.0
+	// Try these for bandwidth calculation
+	// 1. use the average distance between all the centroids divided by two
+	// 2. use max distance between centroids divided by the square root of twice the number of centroids
+	//sum := 0.0
+	//count := 0
+	max := 0.0
+	distance := 0.0
 	for i := 0; i < ncentroids-1; i++ {
 		for j := i + 1; j < ncentroids; j++ {
-			sum += cl.distance(cl.centroids[i], cl.centroids[j])
+			distance = cl.distance(cl.centroids[i], cl.centroids[j])
+			//sum += distance
+			if distance > max {
+				max = distance
+			}
+			//count++
 		}
 	}
-	bandwidth := sum / float64(2*ncentroids)
+	//bandwidth := 0.5 * sum / float64(count)
+	bandwidth := max / math.Sqrt(float64(2*ncentroids))
 	// assign the bandwidth to clusters
 	for i := range ncentroids {
 		cl.bw[i] = bandwidth
 	}
-	return
+	fmt.Printf("\nbandwidth=%.2f\n", bandwidth)
 }
 
 // Reassign clusters to the nearest centroid in Euclidean distance
-func (cl *Cluster) reassignClusters(data [][]float64, centr int, iters int, dataLen int) error {
+func (cl *Cluster) reassignClusters(data [][]float64, centr int, iters int, dataLen int) (float64, error) {
 	wcss := 0.0
+
 	for n := range dataLen {
 		mindist := math.MaxFloat64
 		for m := 0; m <= centr; m++ {
@@ -105,27 +123,23 @@ func (cl *Cluster) reassignClusters(data [][]float64, centr int, iters int, data
 		wcss += mindist * mindist
 	}
 
-	// stop iterations if elbow reached in wcss curve
+	// stop iterations if not changing
 	delta := math.Abs(wcss-cl.wcss[centr-1]) / cl.wcss[centr-1]
-	//delta := math.Abs(wcss - cl.wcss[centr-1])
 	if delta < tol || iters == maxIterations {
-		cl.wcss[centr] = wcss
-		return fmt.Errorf("stop iterations")
+		return wcss, fmt.Errorf("stop iterations")
 	}
-	cl.wcss[centr] = wcss
-	return nil
+	return wcss, nil
 }
 
 // Create a new centroid farthest away in Euclidean distance from other centroids
 func (cl *Cluster) newCentroid(data [][]float64, centr int, dataLen int) error {
-	const eps float64 = 1.0
 	maxdist := 0.0
 	mindata := 0
 	maxdata := 0
 
 	// Create the first centroid randomly from one of the data
-	first := rand.Intn(dataLen)
 	if centr == 0 {
+		first := rand.Intn(dataLen)
 		// assign the first centroid
 		for i := range cl.centroids[centr] {
 			cl.centroids[centr][i] = data[first][i]
@@ -140,17 +154,12 @@ func (cl *Cluster) newCentroid(data [][]float64, centr int, dataLen int) error {
 	}
 
 	// find the min distance for this data point to the current centroids
-	// then find the max of the mins
-dataLoop:
+	// then find the max of the mins of all the data points
 	for n := range dataLen {
 		// loop over the current centroids
 		mindist := math.MaxFloat64
-		for m := 0; m < centr; m++ {
+		for m := range centr {
 			dist := cl.distance(data[n], cl.centroids[m])
-			// skip data that is a centroid already
-			if dist < eps {
-				continue dataLoop
-			}
 			if dist < mindist {
 				mindist = dist
 				mindata = n
@@ -161,6 +170,7 @@ dataLoop:
 			maxdata = mindata
 		}
 	}
+
 	// assign the next centroid using the max(min) from above
 	for i := range cl.centroids[centr] {
 		cl.centroids[centr][i] = data[maxdata][i]
@@ -206,7 +216,8 @@ func Kmeans(ncentroids int, data [][]float64) error {
 	kmc := newCluster(ncentroids, dataLen, centrDim)
 	centr := 0
 
-	// Create the first centroid
+	// Create the first centroid, and use the same starting
+	// point for all the trials below
 	err := kmc.newCentroid(data, centr, dataLen)
 	if err != nil {
 		fmt.Printf("newCentroid %d error: %v\n", centr, err.Error())
@@ -215,19 +226,23 @@ func Kmeans(ncentroids int, data [][]float64) error {
 
 	// create the remaining centroids and assign data to the clusters
 	for centr = 1; centr < ncentroids; centr++ {
-		// create next centroid
-		err := kmc.newCentroid(data, centr, dataLen)
-		if err != nil {
-			fmt.Printf("newCentroid %d error: %v\n", centr, err.Error())
-			return fmt.Errorf("newCentroid %d error: %v", centr, err.Error())
+
+		// Create centr new centroids, don't reuse old ones
+		for n := range centr {
+			err := kmc.newCentroid(data, n+1, dataLen)
+			if err != nil {
+				fmt.Printf("newCentroid %d error: %v\n", n, err.Error())
+				return fmt.Errorf("newCentroid %d error: %v", n, err.Error())
+			}
 		}
 
 		iters := 1
 		// interate until fractional wcss delta between iterations is less than tolerance
 		for {
 			// place the data in nearest cluster based on Euclidean distance
-			if err = kmc.reassignClusters(data, centr, iters, dataLen); err != nil {
+			if wcss, err := kmc.reassignClusters(data, centr, iters, dataLen); err != nil {
 				// stop iterating for this centr
+				kmc.wcss[centr] = wcss
 				break
 			}
 
@@ -237,7 +252,7 @@ func Kmeans(ncentroids int, data [][]float64) error {
 		}
 	}
 
-	// compute common bandwidth for all centroids
+	// compute common bandwidth for all RBFs
 	kmc.computeRBFbandwidth(ncentroids)
 
 	// save to disk centroids, bandwidths, wcss

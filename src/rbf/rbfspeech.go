@@ -15,8 +15,8 @@ The weights are trained by back propagating the output layer errors forward to t
 hidden layer.  The chain rule of differential calculus is used to assign credit
 for the errors in the output to the weights in the hidden layer.
 The output layer outputs are subtracted from the desired to obtain the error.
-The user trains first and then tests.  The RBF Neural Network uses the Softmax function
-(normalized exponential) in the output layer.  Cross-entropy loss is used to compute
+The user trains first and then tests.  The RBF Neural Network uses the Sigmoid
+(Logistic) function in the output layer.  Mean-square error loss is used to compute
 the error in the ouput layer with one-hot vector as the target or desired output.
 This is a classification problem and only one of the ouputs is one, the rest are zero.
 Therefore the outputs are probabilities with values between 0 and 1.
@@ -172,7 +172,7 @@ type RBF struct {
 	node          [][]Node        // nodes in graph
 	nsamples      int             // number of synthetic speech pattern
 	domain        string          // time or spectrogram plot
-	data          []float64       // cross-entropy Loss in output layer per epoch used in Learning Curve
+	mse           []float64       // mean square error in output layer per epoch used in Learning Curve
 	epochs        int             // number of epochs
 	learningRate  float64         // learning rate parameter
 	momentum      float64         // delta weight scale constant
@@ -241,32 +241,32 @@ func rectangle(n int, m int) complex128 {
 	return 1.0
 }
 
-// calculateCrossEntropy Loss finds the error at the output layer every epoch
-func (rbf *RBF) calculateCrossEntropy(epoch int) {
+// calculateMSE calculates the MSE at the output layer every epoch
+func (rbf *RBF) calculateMSE(epoch int) {
 	// loop over the output layer nodes
 	var err float64 = 0.0
-	rbf.data[epoch] = 0.0
-	outputLayer := len(rbf.node) - 1
+	outputLayer := rbf.hiddenLayers + 1
 	for n := 0; n < len(rbf.node[outputLayer]); n++ {
-		// Calculate -Sum(desired(i)*log(y(i))) and store in rbf.data[n]
-		// yi = exp(vi)/sum(exp(vj)), normalized exponential of output layer component i
-		err = -rbf.desired[n] * math.Log(rbf.node[outputLayer][n].y)
-		rbf.data[epoch] += err
+		// Calculate (desired[n] - mlp.node[L][n].y)^2 and store in mlp.mse[n]
+		err = float64(rbf.desired[n]) - rbf.node[outputLayer][n].y
+		err2 := err * err
+		rbf.mse[epoch] += err2
 	}
+	rbf.mse[epoch] /= float64(classes)
 
-	// calculate min/max cross entropy
-	if rbf.data[epoch] < rbf.ymin {
-		rbf.ymin = rbf.data[epoch]
+	// calculate min/max mse
+	if rbf.mse[epoch] < rbf.ymin {
+		rbf.ymin = rbf.mse[epoch]
 	}
-	if rbf.data[epoch] > rbf.ymax {
-		rbf.ymax = rbf.data[epoch]
+	if rbf.mse[epoch] > rbf.ymax {
+		rbf.ymax = rbf.mse[epoch]
 	}
 }
 
 // determineClass determines testing example class given sample number and sample
 func (rbf *RBF) determineClass(sample *Sample) error {
 	// At output layer, classify example and increment class/correct count
-
+	// greatest probability is the winner
 	// convert node outputs to the class; one-hot vector
 	maxy := 0.0
 	class := 0
@@ -289,7 +289,7 @@ func (rbf *RBF) determineClass(sample *Sample) error {
 // class2desired constructs the desired output from the given class
 func (rbf *RBF) class2desired(class int) {
 	// tranform int to slice with one location equal one, all others zero
-	// the so-called one-hot vector
+	// the so-called one-hot vector; this represents a probability
 	for i := 0; i < len(rbf.desired); i++ {
 		if i == class {
 			rbf.desired[i] = 1.0
@@ -313,8 +313,10 @@ func (rbf *RBF) gaussRBF(x []float64, mean []float64, bw float64) float64 {
 func (rbf *RBF) propagateForward(samp *Sample) error {
 	// Assign sample to input layer
 	layer := 0
+	v := make([]float64, len(rbf.node[layer]))
 	for i, val := range samp.data {
 		rbf.node[layer][i].y = val.y
+		v[i] = val.y
 	}
 
 	// calculate desired from the class
@@ -323,16 +325,10 @@ func (rbf *RBF) propagateForward(samp *Sample) error {
 	// Loop over layers: input + hiddenLayer + output layer
 	// input->hidden, then hidden->output
 	for layer := 1; layer <= rbf.hiddenLayers; layer++ {
-		// Loop over FMs in the layer, d1 is the layer depth of current
+		// Loop over nodes in the layer, d1 is the layer depth of current
 		d1 := len(rbf.node[layer])
 		for i1 := 1; i1 < d1; i1++ { // current layer loop
 			// The network is fully connected.
-			// Loop over weights to get v.  d2 is the layer depth of previous
-			d2 := len(rbf.node[layer-1])
-			v := make([]float64, d2)
-			for i2 := range d2 { // previous layer loop
-				v[i1-1] = rbf.link[layer-1][i2*(d1-1)+i1-1].wgt * rbf.node[layer-1][i2].y
-			}
 			// compute output y = RBF output
 			rbf.node[layer][i1].y = rbf.gaussRBF(v, rbf.cluster[i1-1].mean, rbf.cluster[i1-1].bw)
 		}
@@ -340,7 +336,6 @@ func (rbf *RBF) propagateForward(samp *Sample) error {
 
 	// Loop over nodes hidden layer to output layer
 	layer = rbf.hiddenLayers + 1
-	sum := 0.0
 	d1 := len(rbf.node[layer])
 	for i1 := range d1 { // current layer loop
 		// Each node in previous layer is connected to current node because
@@ -350,13 +345,8 @@ func (rbf *RBF) propagateForward(samp *Sample) error {
 		for i2 := range d2 { // previous layer loop
 			v += rbf.link[layer-1][i2*d1+i1].wgt * rbf.node[layer-1][i2].y
 		}
-		// compute output using Softmax, normalized exponential
-		rbf.node[layer][i1].y = math.Exp(v)
-		sum += rbf.node[layer][i1].y
-	}
-	// normalize the exponential to make a probability in (0, 1)
-	for i := range rbf.node[layer] {
-		rbf.node[layer][i].y /= sum
+		// compute output using sigmoid (logistic) function
+		rbf.node[layer][i1].y = 1.0 / (1.0 + math.Exp(-v))
 	}
 	return nil
 }
@@ -370,6 +360,8 @@ func (rbf *RBF) propagateBackward() error {
 		//compute error e=d-y, where y is the normalized exponential or probability,
 		// d is 0 or 1, the one-hot vector
 		rbf.node[layer][i1].delta = rbf.desired[i1] - rbf.node[layer][i1].y
+		// Multiply error by this node's Phi'(v) to get local gradient.
+		rbf.node[layer][i1].delta *= rbf.node[layer][i1].y * (1.0 - rbf.node[layer][i1].y)
 		// Each node in previous layer is connected to current node because the network
 		// is fully connected.  d2 is the previous layer depth
 		d2 := len(rbf.node[layer-1])
@@ -444,8 +436,8 @@ func (rbf *RBF) runTrainingEpochs() error {
 			return fmt.Errorf("backward propagation error: %s", err.Error())
 		}
 
-		// At the end of each epoch, loop over the output nodes and calculate cross entropy loss
-		rbf.calculateCrossEntropy(n)
+		// At the end of each epoch, loop over the output nodes and calculate mse
+		rbf.calculateMSE(n)
 
 	}
 	return nil
@@ -483,8 +475,8 @@ func (rbf *RBF) createPatterns() error {
 	const (
 		amplMinf1  = 500.0
 		amplMaxf1  = 1000.0
-		f1Min      = 200   // Hz = cycles/sec
-		f1Max      = 800   // Hz = cycles/sec
+		f1Min      = 100   // Hz = cycles/sec
+		f1Max      = 3800  // Hz = cycles/sec
 		sigmaNoise = 200.0 // unvoiced speech
 		nyquist    = sampleRate / 2
 		frameScale = 2 // frame extender
@@ -616,7 +608,7 @@ func (rbf *RBF) createKmeansCluster() error {
 }
 
 // Retrieve K-means cluster data:  centroids, bandwidth, and WCSS
-func (rbf *RBF) getKmeansCluster() error {
+func (rbf *RBF) getKmeansCluster(endpoints *Endpoints) error {
 	fKmeans, err := os.Open(path.Join(dataDir, filekmeans))
 	if err != nil {
 		fmt.Printf("Open file %s error: %v", filekmeans, err)
@@ -626,6 +618,9 @@ func (rbf *RBF) getKmeansCluster() error {
 
 	scanner := bufio.NewScanner(fKmeans)
 	n := 0
+	// save min and max of wcss
+	endpoints.ymin = math.MaxFloat64
+	endpoints.ymax = 0.0
 	for scanner.Scan() {
 		line := scanner.Text()
 		items := strings.Split(line, ",")
@@ -653,6 +648,12 @@ func (rbf *RBF) getKmeansCluster() error {
 			continue
 		}
 		rbf.cluster[n].wcss = wcss
+		if wcss > endpoints.ymax {
+			endpoints.ymax = wcss
+		}
+		if wcss < endpoints.ymin {
+			endpoints.ymin = wcss
+		}
 		n++
 	}
 	if err = scanner.Err(); err != nil {
@@ -932,8 +933,8 @@ func newTrainingRBF(r *http.Request, hiddenLayers int, plot *PlotT) (*RBF, error
 	// construct desired from classes, one-hot vector
 	rbf.desired = make([]float64, olnodes)
 
-	// cross-entropy loss
-	rbf.data = make([]float64, epochs)
+	// mean-square error
+	rbf.mse = make([]float64, epochs)
 
 	// synthetic speech for creating speech with synthesize
 	rbf.synSpeech = make([]float64, nsamples)
@@ -950,7 +951,7 @@ func newTrainingRBF(r *http.Request, hiddenLayers int, plot *PlotT) (*RBF, error
 func (rbf *RBF) gridFillInterp() error {
 	var (
 		x            float64 = 0.0
-		y            float64 = rbf.data[0]
+		y            float64 = rbf.mse[0]
 		prevX, prevY float64
 		xscale       float64
 		yscale       float64
@@ -978,10 +979,10 @@ func (rbf *RBF) gridFillInterp() error {
 	lenEPx := rbf.xmax - rbf.xmin
 
 	// Continue with the rest of the points in the file
-	for i := 1; i < len(rbf.data); i++ {
+	for i := 1; i < len(rbf.mse); i++ {
 		x++
-		// mse/epoch or percent-correct/pattern
-		y = rbf.data[i]
+		// mse/epoch
+		y = rbf.mse[i]
 
 		// This cell location (row,col) is on the line
 		row := int((rbf.ymax-y)*yscale + .5)
@@ -1189,7 +1190,7 @@ func handleTrainingRBF(w http.ResponseWriter, r *http.Request) {
 				}
 
 				// retrieve K-means cluster data consisting of RBF prototypes
-				if err := rbf.getKmeansCluster(); err != nil {
+				if err := rbf.getKmeansCluster(&Endpoints{}); err != nil {
 					fmt.Printf("getKmeansCluster error: %v\n", err)
 					plot.Status = fmt.Sprintf("getKmeansCluster error: %v", err.Error())
 					// Write to HTTP using template and grid
@@ -1608,7 +1609,7 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 	rbf.desired = make([]float64, olnodes)
 
 	// percent correct classification of speech patterns
-	rbf.data = make([]float64, classes)
+	rbf.mse = make([]float64, classes)
 
 	// synthetic speech for creating speech with synthesize
 	rbf.synSpeech = make([]float64, nsamples)
@@ -1677,6 +1678,12 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 				return nil, fmt.Errorf("speech parameter scanner error: %s", err.Error())
 			}
 		}
+
+		// retrieve K-means cluster data consisting of RBF prototypes
+		if err := rbf.getKmeansCluster(&Endpoints{}); err != nil {
+			fmt.Printf("getKmeansCluster error: %v\n", err)
+			return nil, fmt.Errorf("getKmeansCluster error: %v", err)
+		}
 	}
 	return &rbf, nil
 }
@@ -1720,8 +1727,8 @@ func handleTestingRBF(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Put the percent correct in data
-	for pat := range rbf.data {
-		rbf.data[pat] = float64(rbf.statistics.correct[pat]) / float64(rbf.statistics.classCount[pat]) * 100.0
+	for pat := range rbf.mse {
+		rbf.mse[pat] = float64(rbf.statistics.correct[pat]) / float64(rbf.statistics.classCount[pat]) * 100.0
 	}
 	// Put data in PlotT
 	err = rbf.gridFillInterp()
@@ -1996,7 +2003,8 @@ func (rbf *RBF) processKmeansCluster() error {
 	)
 
 	// retrieve K-means cluster data consisting of RBF prototypes
-	if err := rbf.getKmeansCluster(); err != nil {
+	// get the min and max of wcss and save in endpoints
+	if err := rbf.getKmeansCluster(&endpoints); err != nil {
 		fmt.Printf("getKmeansCluster error: %v\n", err)
 		return fmt.Errorf("getKmeansCluster error: %v", err)
 	}
@@ -2008,49 +2016,48 @@ func (rbf *RBF) processKmeansCluster() error {
 	rbf.nsamples = len(rbf.cluster)
 
 	// time starts at 0 and ends at number of centroids = classes
-	endpoints.xmin = 0.0
+	endpoints.xmin = 1.0
 	// max value of K in K-means cluster
-	endpoints.xmax = float64(classes - 1)
-	// wcss versus K is monotonic decreasing
-	endpoints.ymin = rbf.cluster[classes-1].wcss
-	endpoints.ymax = rbf.cluster[0].wcss
+	endpoints.xmax = float64(classes)
+	// endpoints for ymin and ymax found in call to getKmeansCluster above
 
 	// EP means endpoints
 	lenEPx := endpoints.xmax - endpoints.xmin
 	lenEPy := endpoints.ymax - endpoints.ymin
-	prevTime := 0.0
+	prevTime := 1.0
 	prevAmpl := rbf.cluster[0].wcss
 
 	// Calculate scale factors for x and y
 	xscale = float64(cols-1) / (endpoints.xmax - endpoints.xmin)
 	yscale = float64(rows-1) / (endpoints.ymax - endpoints.ymin)
 
+	// Current time
+	currTime := 1.0
 	// This previous cell location (row,col) is on the line (visible)
-	row := int((endpoints.ymax-rbf.cluster[0].wcss)*yscale + .5)
-	col := int((0.0-endpoints.xmin)*xscale + .5)
+	row := int((endpoints.ymax-rbf.cluster[int(currTime-1.0)].wcss)*yscale + .5)
+	col := int((currTime-endpoints.xmin)*xscale + .5)
 	rbf.plot.Grid[row*cols+col] = "online"
 
 	// Store the amplitude in the plot Grid
-	for n := 1; n < rbf.nsamples; n++ {
-		// Current time
-		currTime := float64(n)
+	for n := 2; n <= rbf.nsamples; n++ {
+		currTime = float64(n)
 
 		// This current cell location (row,col) is on the line (visible)
-		row := int((endpoints.ymax-rbf.cluster[n].wcss)*yscale + .5)
+		row := int((endpoints.ymax-rbf.cluster[n-1].wcss)*yscale + .5)
 		col := int((currTime-endpoints.xmin)*xscale + .5)
 		rbf.plot.Grid[row*cols+col] = "online"
 
 		// Interpolate the points between previous point and current point;
 		// draw a straight line between points.
 		lenEdgeTime := math.Abs((currTime - prevTime))
-		lenEdgeAmpl := math.Abs(rbf.cluster[n].wcss - prevAmpl)
+		lenEdgeAmpl := math.Abs(rbf.cluster[n-1].wcss - prevAmpl)
 		ncellsTime := int(float64(cols) * lenEdgeTime / lenEPx) // number of points to interpolate in x-dim
 		ncellsAmpl := int(float64(rows) * lenEdgeAmpl / lenEPy) // number of points to interpolate in y-dim
 		// Choose the biggest
 		ncells := max(ncellsAmpl, ncellsTime)
 
 		stepTime := float64(currTime-prevTime) / float64(ncells)
-		stepAmpl := float64(rbf.cluster[n].wcss-prevAmpl) / float64(ncells)
+		stepAmpl := float64(rbf.cluster[n-1].wcss-prevAmpl) / float64(ncells)
 
 		// loop to draw the points
 		interpTime := prevTime
@@ -2066,7 +2073,7 @@ func (rbf *RBF) processKmeansCluster() error {
 
 		// Update the previous point with the current point
 		prevTime = currTime
-		prevAmpl = rbf.cluster[n].wcss
+		prevAmpl = rbf.cluster[n-1].wcss
 
 	}
 
