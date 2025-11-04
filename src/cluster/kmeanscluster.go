@@ -55,9 +55,6 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 	for m := 0; m <= centr; m++ {
 		sum := make([]float64, centrDim)
 		count := 0
-		if centr == 63 {
-			fmt.Printf("centroid=%d, ", m)
-		}
 		// loop over data in this cluster
 		for n := range dataLen {
 			if cl.dataCluster[n] == m {
@@ -67,15 +64,32 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 				count++
 			}
 		}
-		if centr == 63 {
-			fmt.Printf("count=%d\n", count)
-		}
 		// new centroid location
 		for i := range cl.centroids[m] {
 			cl.centroids[m][i] = sum[i] / float64(count)
 		}
 	}
 	return nil
+}
+
+// Compute each cluster's standard deviation
+func (cl *Cluster) computerRBFstdev(ncentroids int, data [][]float64, dataLen int) {
+	// is data point in the this cluster
+
+	// loop over centroids/clusters
+	for m := 0; m < ncentroids; m++ {
+		sum := 0.0
+		count := 0
+		// loop over data in this cluster
+		for n := range dataLen {
+			if cl.dataCluster[n] == m {
+				dist := cl.distance(data[n], cl.centroids[m])
+				sum += dist * dist
+				count++
+			}
+		}
+		cl.bw[m] = math.Sqrt(sum / float64(count))
+	}
 }
 
 // Compute a common bandwidth for the RBFs
@@ -104,7 +118,6 @@ func (cl *Cluster) computeRBFbandwidth(ncentroids int) {
 	for i := range ncentroids {
 		cl.bw[i] = bandwidth
 	}
-	fmt.Printf("\nbandwidth=%.2f\n", bandwidth)
 }
 
 // Reassign clusters to the nearest centroid in Euclidean distance
@@ -203,6 +216,10 @@ func (cl *Cluster) saveClusterData() error {
 		}
 		fmt.Fprintf(fout, "%.16f,%.16f\n", cl.bw[i], cl.wcss[i])
 	}
+	if err = fout.Sync(); err != nil {
+		fmt.Printf("%s Sync error: %v\n", kmeans, err.Error())
+		return fmt.Errorf("%s Sync error: %v", kmeans, err.Error())
+	}
 	return nil
 }
 
@@ -253,7 +270,10 @@ func Kmeans(ncentroids int, data [][]float64) error {
 	}
 
 	// compute common bandwidth for all RBFs
-	kmc.computeRBFbandwidth(ncentroids)
+	//kmc.computeRBFbandwidth(ncentroids)
+
+	// compute standard deviation for each cluster
+	kmc.computerRBFstdev(ncentroids, data, dataLen)
 
 	// save to disk centroids, bandwidths, wcss
 	err = kmc.saveClusterData()

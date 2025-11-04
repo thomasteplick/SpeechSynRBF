@@ -176,7 +176,7 @@
 							Rectangle window uses no overlap for FFT. The Spectral Power Density uses 128 frequency bins.  Specify 
 							the number of hidden layers and their common depth.  Variation of the synthetic speech parameters is 
 							determined by <i>Percent Voiced</i>, <i>Pitch Delta</i>, <i>Duration Delta</i>, and <i>Amplitude Delta</i>.  They determine
-							how well the MLP Neural Network generalizes and classifies the testing samples.
+							how well the RBF Neural Network generalizes and classifies the testing samples.
 					   </p>
 					   <div class="options">
 							<table>
@@ -185,13 +185,13 @@
 										<label for="learningrate">Learning Rate:</label>
 									</td>
 									<td>
-										<input type="number" id="learningrate" name="learningrate" value="{{.LearningRate}}" min=".0001" max=".9999" step=".0001" required />
+										<input type="number" id="learningrate" name="learningrate" value="{{.LearningRate}}" min=".00001" max=".9999" step=".00001" required />
 									</td>
 									<td class="align-right">
 										<label for="momentum">Momentum:</label>
 									</td>
 									<td>
-										<input type="number" id="momentum" name="momentum" value="{{.Momentum}}" min="0" max=".9999" step=".0001" required />
+										<input type="number" id="momentum" name="momentum" value="{{.Momentum}}" min="0" max=".9999" step=".00001" required />
 									</td>
 								</tr>
 								<tr>
@@ -241,7 +241,7 @@
 										<label for="layerdepth">Layer Depth:</label>
 									</td>
 									<td>
-										<input type="number" id="layerdepth" name="layerdepth" value="{{.LayerDepth}}" min="64" max="64" required />
+										<input type="number" id="layerdepth" name="layerdepth" value="{{.LayerDepth}}" min="60" max="128" required />
 									</td>
 									<td></td>
 									<td></td>

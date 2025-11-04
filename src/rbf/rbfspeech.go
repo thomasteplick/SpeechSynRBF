@@ -17,7 +17,7 @@ for the errors in the output to the weights in the hidden layer.
 The output layer outputs are subtracted from the desired to obtain the error.
 The user trains first and then tests.  The RBF Neural Network uses the Sigmoid
 (Logistic) function in the output layer.  Mean-square error loss is used to compute
-the error in the ouput layer with one-hot vector as the target or desired output.
+the error in the ouput layer with an encoded vector as the target or desired output.
 This is a classification problem and only one of the ouputs is one, the rest are zero.
 Therefore the outputs are probabilities with values between 0 and 1.
 
@@ -86,6 +86,10 @@ const (
 	avgDuration        = 200                          // average duration in samples of the speech frame size
 	classes            = 64                           // number of classes is the number of speech patterns or words
 	maxSubFreq         = 5                            // max number of sub-frequencies
+	a                  = 1.7159                       // activation function const
+	b                  = 2.0 / 3.0                    // activation function const
+	K1                 = b / a
+	K2                 = a * a
 )
 
 // test statistics that are tabulated in HTML
@@ -244,15 +248,18 @@ func rectangle(n int, m int) complex128 {
 // calculateMSE calculates the MSE at the output layer every epoch
 func (rbf *RBF) calculateMSE(epoch int) {
 	// loop over the output layer nodes
-	var err float64 = 0.0
+	err := 0.0
 	outputLayer := rbf.hiddenLayers + 1
+	//fmt.Printf("epoch=%d:", epoch)
 	for n := 0; n < len(rbf.node[outputLayer]); n++ {
-		// Calculate (desired[n] - mlp.node[L][n].y)^2 and store in mlp.mse[n]
-		err = float64(rbf.desired[n]) - rbf.node[outputLayer][n].y
+		// Calculate (desired[n] - rbf.node[L][n].y)^2 and store in rbf.mse[n]
+		err = rbf.desired[n] - rbf.node[outputLayer][n].y
 		err2 := err * err
 		rbf.mse[epoch] += err2
+		//fmt.Printf("%.3f - %.3f ", rbf.desired[n], rbf.node[outputLayer][n].y)
 	}
-	rbf.mse[epoch] /= float64(classes)
+	//fmt.Println()
+	rbf.mse[epoch] /= float64(len(rbf.node[outputLayer]))
 
 	// calculate min/max mse
 	if rbf.mse[epoch] < rbf.ymin {
@@ -266,14 +273,11 @@ func (rbf *RBF) calculateMSE(epoch int) {
 // determineClass determines testing example class given sample number and sample
 func (rbf *RBF) determineClass(sample *Sample) error {
 	// At output layer, classify example and increment class/correct count
-	// greatest probability is the winner
-	// convert node outputs to the class; one-hot vector
-	maxy := 0.0
+	// convert node outputs to the class; zero is the threshold
 	class := 0
 	for i, output := range rbf.node[rbf.hiddenLayers+1] {
-		if output.y > maxy {
-			maxy = output.y
-			class = i
+		if output.y > 0.0 {
+			class |= (1 << i)
 		}
 	}
 
@@ -288,14 +292,14 @@ func (rbf *RBF) determineClass(sample *Sample) error {
 
 // class2desired constructs the desired output from the given class
 func (rbf *RBF) class2desired(class int) {
-	// tranform int to slice with one location equal one, all others zero
-	// the so-called one-hot vector; this represents a probability
+	// tranform int to slice of -1 and 1 representing the 0 and 1 bits
 	for i := 0; i < len(rbf.desired); i++ {
-		if i == class {
-			rbf.desired[i] = 1.0
+		if class&1 == 1 {
+			rbf.desired[i] = 1
 		} else {
-			rbf.desired[i] = 0.0
+			rbf.desired[i] = -1
 		}
+		class >>= 1
 	}
 }
 
@@ -324,13 +328,21 @@ func (rbf *RBF) propagateForward(samp *Sample) error {
 
 	// Loop over layers: input + hiddenLayer + output layer
 	// input->hidden, then hidden->output
+	maxVal := 0.0
 	for layer := 1; layer <= rbf.hiddenLayers; layer++ {
 		// Loop over nodes in the layer, d1 is the layer depth of current
 		d1 := len(rbf.node[layer])
-		for i1 := 1; i1 < d1; i1++ { // current layer loop
+		for i1 := range d1 { // current layer loop
 			// The network is fully connected.
 			// compute output y = RBF output
-			rbf.node[layer][i1].y = rbf.gaussRBF(v, rbf.cluster[i1-1].mean, rbf.cluster[i1-1].bw)
+			rbf.node[layer][i1].y = rbf.gaussRBF(v, rbf.cluster[i1].mean, rbf.cluster[i1].bw)
+			if rbf.node[layer][i1].y > maxVal {
+				maxVal = rbf.node[layer][i1].y
+			}
+		}
+		// normalize RBF ouput to be in linear range of output activation function tanh
+		for i1 := range d1 {
+			rbf.node[layer][i1].y = 2.0 * (rbf.node[layer][i1].y/maxVal - 0.5)
 		}
 	}
 
@@ -345,8 +357,8 @@ func (rbf *RBF) propagateForward(samp *Sample) error {
 		for i2 := range d2 { // previous layer loop
 			v += rbf.link[layer-1][i2*d1+i1].wgt * rbf.node[layer-1][i2].y
 		}
-		// compute output using sigmoid (logistic) function
-		rbf.node[layer][i1].y = 1.0 / (1.0 + math.Exp(-v))
+		// compute output y = Phi(v)
+		rbf.node[layer][i1].y = a * math.Tanh(b*v)
 	}
 	return nil
 }
@@ -357,11 +369,10 @@ func (rbf *RBF) propagateBackward() error {
 	layer := rbf.hiddenLayers + 1
 	d1 := len(rbf.node[layer])
 	for i1 := range d1 { // this layer loop
-		//compute error e=d-y, where y is the normalized exponential or probability,
-		// d is 0 or 1, the one-hot vector
+		//compute error e=d-Phi(v)
 		rbf.node[layer][i1].delta = rbf.desired[i1] - rbf.node[layer][i1].y
 		// Multiply error by this node's Phi'(v) to get local gradient.
-		rbf.node[layer][i1].delta *= rbf.node[layer][i1].y * (1.0 - rbf.node[layer][i1].y)
+		rbf.node[layer][i1].delta *= K1 * (K2 - rbf.node[layer][i1].y*rbf.node[layer][i1].y)
 		// Each node in previous layer is connected to current node because the network
 		// is fully connected.  d2 is the previous layer depth
 		d2 := len(rbf.node[layer-1])
@@ -396,6 +407,8 @@ func (rbf *RBF) runTrainingEpochs() error {
 	for i := range rbf.link[rbf.hiddenLayers] {
 		rbf.link[rbf.hiddenLayers][i].wgt = 2.0 * (rand.Float64() - .5) / float64(rbf.layerDepth)
 		rbf.link[rbf.hiddenLayers][i].wgtDelta = 2.0 * (rand.Float64() - .5) / float64(rbf.layerDepth)
+		//rbf.link[rbf.hiddenLayers][i].wgt = 2.0 * (rand.Float64() - .5)
+		//rbf.link[rbf.hiddenLayers][i].wgtDelta = 2.0 * (rand.Float64() - .5)
 	}
 
 	// Create a sample for containing the spectrogram to propagate forward
@@ -436,8 +449,10 @@ func (rbf *RBF) runTrainingEpochs() error {
 			return fmt.Errorf("backward propagation error: %s", err.Error())
 		}
 
+		//fmt.Printf("epoch=%d\n", n)
 		// At the end of each epoch, loop over the output nodes and calculate mse
 		rbf.calculateMSE(n)
+		//fmt.Println()
 
 	}
 	return nil
@@ -599,7 +614,7 @@ func (rbf *RBF) createKmeansCluster() error {
 	}
 
 	// create the K-means
-	err := cluster.Kmeans(classes, data)
+	err := cluster.Kmeans(rbf.layerDepth, data)
 	if err != nil {
 		fmt.Printf("cluster.Kmeans error: %v\n", err.Error())
 		return fmt.Errorf("cluster.Kmeans error: %v", err.Error())
@@ -894,13 +909,13 @@ func newTrainingRBF(r *http.Request, hiddenLayers int, plot *PlotT) (*RBF, error
 		percentVoiced: percentVoiced,
 		freqs:         make([]float64, maxSubFreq+1),
 		amps:          make([]float64, maxSubFreq+1),
-		cluster:       make([]Kmeans, classes),
+		cluster:       make([]Kmeans, layerDepth),
 	}
 	// make SpeechFrames for the speech patterns
 	nsamples := rbf.fftSize * nffts
 
-	// number of outer layer nodes
-	olnodes := classes
+	// outer layer nodes
+	olnodes := int(math.Ceil(math.Log2(float64(classes))))
 
 	// input layer nodes are largest PSD bins for each STFT
 	ilnodes := classes
@@ -912,26 +927,21 @@ func newTrainingRBF(r *http.Request, hiddenLayers int, plot *PlotT) (*RBF, error
 	rbf.link[0] = make([]Link, ilnodes*layerDepth)
 
 	// output layer links
-	rbf.link[len(rbf.link)-1] = make([]Link, olnodes*(layerDepth+1))
+	rbf.link[len(rbf.link)-1] = make([]Link, olnodes*layerDepth)
 
-	// construct node, init node[i][0].y to 1.0 (bias)
+	// construct nodes
 	rbf.node = make([][]Node, hiddenLayers+2)
 
 	// input layer
 	rbf.node[0] = make([]Node, ilnodes)
 
-	// output layer, which has no bias node
+	// output layer
 	rbf.node[hiddenLayers+1] = make([]Node, olnodes)
 
 	// hidden layer
 	for i := 1; i <= hiddenLayers; i++ {
-		rbf.node[i] = make([]Node, layerDepth+1)
-		// set first node in the layer (bias) to 1
-		rbf.node[i][0].y = 1.0
+		rbf.node[i] = make([]Node, layerDepth)
 	}
-
-	// construct desired from classes, one-hot vector
-	rbf.desired = make([]float64, olnodes)
 
 	// mean-square error
 	rbf.mse = make([]float64, epochs)
@@ -940,9 +950,12 @@ func newTrainingRBF(r *http.Request, hiddenLayers int, plot *PlotT) (*RBF, error
 	rbf.synSpeech = make([]float64, nsamples)
 
 	// K-means cluster data for centroids
-	for i := range classes {
-		rbf.cluster[i].mean = make([]float64, classes)
+	for i := range layerDepth {
+		rbf.cluster[i].mean = make([]float64, ilnodes)
 	}
+
+	// construct desired from classes, binary representation
+	rbf.desired = make([]float64, olnodes)
 
 	return &rbf, nil
 }
@@ -1100,107 +1113,108 @@ func handleTrainingRBF(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			// Read the synthetic speech patterns
-		} else {
-			files, err := os.ReadDir(dataDir)
-			if err != nil {
-				fmt.Printf("ReadDir %s error: %v\n", dataDir, err)
-				plot.Status = fmt.Sprintf("ReadDir %s error: %v", dataDir, err.Error())
-				// Write to HTTP using template and grid
-				if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-					log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-				}
-				return
-			}
-			if len(files) == 0 {
-				fmt.Printf("No synthetic speech files in %s\n", dataDir)
-				plot.Status = fmt.Sprintf("No filter files in %s", dataDir)
-				// Write to HTTP using template and grid
-				if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-					log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-				}
-				return
-			} else {
-				// make SpeechFrames for the speech patterns
-				nsamples := rbf.fftSize * nffts
-				// a frame consists of avgDuration samples = 25ms of speech sampled at 8,000 Hz
-				nframes := int(math.Ceil(float64(nsamples) / float64(avgDuration)))
-				rbf.speechPat = make([][]SpeechFrame, classes)
-				for i := range rbf.speechPat {
-					rbf.speechPat[i] = make([]SpeechFrame, nframes)
-				}
-				pattern := 0
-				// Retrieve the speech files
-				for _, dirEntry := range files {
-					name := dirEntry.Name()
-					if strings.Contains(name, "speech") && strings.Contains(name, "csv") {
-						fspeech, err := os.Open(filepath.Join(dataDir, name))
-						if err != nil {
-							fmt.Printf("Open %s error: %v\n", name, err)
-							plot.Status = fmt.Sprintf("Open %s error: %v", name, err.Error())
-							// Write to HTTP using template and grid
-							if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-								log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-							}
-							return
-						}
-						scanner := bufio.NewScanner(fspeech)
-						frame := 0
-						for scanner.Scan() {
-							line := scanner.Text()
-							items := strings.Split(line, ",")
-							nfreqs := len(items) / 2
-							rbf.speechPat[pattern][frame].freqs = make([]float64, nfreqs)
-							rbf.speechPat[pattern][frame].amps = make([]float64, nfreqs)
-							for i := 0; i < nfreqs; i++ {
-								freq, err := strconv.ParseFloat(items[i], 64)
-								if err != nil {
-									plot.Status = fmt.Sprintf("freq %d conversion error: %v", i, err.Error())
-									// Write to HTTP using template and grid
-									if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-										log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-									}
-									return
-								}
-								ampl, err := strconv.ParseFloat(items[i+nfreqs], 64)
-								if err != nil {
-									plot.Status = fmt.Sprintf("ampl %d conversion error: %v", i, err.Error())
-									// Write to HTTP using template and grid
-									if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-										log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-									}
-									return
-								}
-								rbf.speechPat[pattern][frame].amps[i] = ampl
-								rbf.speechPat[pattern][frame].freqs[i] = freq
-							}
-							frame++
-						}
-						fspeech.Close()
-						if err = scanner.Err(); err != nil {
-							fmt.Printf("speech file scanner error: %s", err.Error())
-							// Write to HTTP using template and grid
-							if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-								log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-							}
-							return
-						}
-						pattern++
-					}
-				}
+		}
 
-				// retrieve K-means cluster data consisting of RBF prototypes
-				if err := rbf.getKmeansCluster(&Endpoints{}); err != nil {
-					fmt.Printf("getKmeansCluster error: %v\n", err)
-					plot.Status = fmt.Sprintf("getKmeansCluster error: %v", err.Error())
-					// Write to HTTP using template and grid
-					if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-						log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+		// Read the synthetic speech patterns
+		files, err := os.ReadDir(dataDir)
+		if err != nil {
+			fmt.Printf("ReadDir %s error: %v\n", dataDir, err)
+			plot.Status = fmt.Sprintf("ReadDir %s error: %v", dataDir, err.Error())
+			// Write to HTTP using template and grid
+			if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+				log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+			}
+			return
+		}
+		if len(files) == 0 {
+			fmt.Printf("No synthetic speech files in %s\n", dataDir)
+			plot.Status = fmt.Sprintf("No filter files in %s", dataDir)
+			// Write to HTTP using template and grid
+			if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+				log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+			}
+			return
+		} else {
+			// make SpeechFrames for the speech patterns
+			nsamples := rbf.fftSize * nffts
+			// a frame consists of avgDuration samples = 25ms of speech sampled at 8,000 Hz
+			nframes := int(math.Ceil(float64(nsamples) / float64(avgDuration)))
+			rbf.speechPat = make([][]SpeechFrame, classes)
+			for i := range rbf.speechPat {
+				rbf.speechPat[i] = make([]SpeechFrame, nframes)
+			}
+			pattern := 0
+			// Retrieve the speech files
+			for _, dirEntry := range files {
+				name := dirEntry.Name()
+				if strings.Contains(name, "speech") && strings.Contains(name, "csv") {
+					fspeech, err := os.Open(filepath.Join(dataDir, name))
+					if err != nil {
+						fmt.Printf("Open %s error: %v\n", name, err)
+						plot.Status = fmt.Sprintf("Open %s error: %v", name, err.Error())
+						// Write to HTTP using template and grid
+						if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+							log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+						}
+						return
 					}
-					return
+					scanner := bufio.NewScanner(fspeech)
+					frame := 0
+					for scanner.Scan() {
+						line := scanner.Text()
+						items := strings.Split(line, ",")
+						nfreqs := len(items) / 2
+						rbf.speechPat[pattern][frame].freqs = make([]float64, nfreqs)
+						rbf.speechPat[pattern][frame].amps = make([]float64, nfreqs)
+						for i := 0; i < nfreqs; i++ {
+							freq, err := strconv.ParseFloat(items[i], 64)
+							if err != nil {
+								plot.Status = fmt.Sprintf("freq %d conversion error: %v", i, err.Error())
+								// Write to HTTP using template and grid
+								if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+									log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+								}
+								return
+							}
+							ampl, err := strconv.ParseFloat(items[i+nfreqs], 64)
+							if err != nil {
+								plot.Status = fmt.Sprintf("ampl %d conversion error: %v", i, err.Error())
+								// Write to HTTP using template and grid
+								if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+									log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+								}
+								return
+							}
+							rbf.speechPat[pattern][frame].amps[i] = ampl
+							rbf.speechPat[pattern][frame].freqs[i] = freq
+						}
+						frame++
+					}
+					fspeech.Close()
+					if err = scanner.Err(); err != nil {
+						fmt.Printf("speech file scanner error: %s", err.Error())
+						// Write to HTTP using template and grid
+						if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+							log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+						}
+						return
+					}
+					pattern++
 				}
 			}
 		}
+
+		// retrieve K-means cluster data consisting of RBF prototypes
+		if err := rbf.getKmeansCluster(&Endpoints{}); err != nil {
+			fmt.Printf("getKmeansCluster error: %v\n", err)
+			plot.Status = fmt.Sprintf("getKmeansCluster error: %v", err.Error())
+			// Write to HTTP using template and grid
+			if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+				log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+			}
+			return
+		}
+
 		// Loop over the Epochs
 		err = rbf.runTrainingEpochs()
 		if err != nil {
@@ -1213,7 +1227,7 @@ func handleTrainingRBF(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Put cross entropy vs Epoch in PlotT
+		// Put MSE vs Epoch in PlotT
 		err = rbf.gridFillInterp()
 		if err != nil {
 			fmt.Printf("gridFillInterp() error: %v\n", err)
@@ -1231,8 +1245,8 @@ func handleTrainingRBF(w http.ResponseWriter, r *http.Request) {
 		// At the end of all epochs, insert form previous control items in PlotT
 		rbf.plot.HiddenLayers = strconv.Itoa(rbf.hiddenLayers)
 		rbf.plot.LayerDepth = strconv.Itoa(rbf.layerDepth)
-		rbf.plot.LearningRate = strconv.FormatFloat(rbf.learningRate, 'f', 4, 64)
-		rbf.plot.Momentum = strconv.FormatFloat(rbf.momentum, 'f', 4, 64)
+		rbf.plot.LearningRate = strconv.FormatFloat(rbf.learningRate, 'f', 5, 64)
+		rbf.plot.Momentum = strconv.FormatFloat(rbf.momentum, 'f', 5, 64)
 		rbf.plot.Epochs = strconv.Itoa(rbf.epochs)
 		rbf.plot.DelDuration = strconv.Itoa(rbf.delDuration)
 		rbf.plot.DelPitch = strconv.Itoa(rbf.delPitch)
@@ -1269,7 +1283,7 @@ func handleTrainingRBF(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		rbf.plot.Status = "Cross-Entropy Loss plotted"
+		rbf.plot.Status = "Mean-square Error plotted"
 
 		// Execute data on HTML template
 		if err = tmplTrainingRBF.Execute(w, rbf.plot); err != nil {
@@ -1417,8 +1431,8 @@ func (rbf *RBF) runTestingEpochs() error {
 
 	rbf.plot.Status = "Testing results completed."
 
-	rbf.plot.LearningRate = strconv.FormatFloat(rbf.learningRate, 'f', -1, 64)
-	rbf.plot.Momentum = strconv.FormatFloat(rbf.momentum, 'f', -1, 64)
+	rbf.plot.LearningRate = strconv.FormatFloat(rbf.learningRate, 'f', 5, 64)
+	rbf.plot.Momentum = strconv.FormatFloat(rbf.momentum, 'f', 5, 64)
 	rbf.plot.HiddenLayers = strconv.Itoa(rbf.hiddenLayers)
 	rbf.plot.LayerDepth = strconv.Itoa(rbf.layerDepth)
 	rbf.plot.Epochs = strconv.Itoa(rbf.epochs)
@@ -1538,7 +1552,7 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 		percentVoiced: percentVoiced,
 		freqs:         make([]float64, maxSubFreq+1),
 		amps:          make([]float64, maxSubFreq+1),
-		cluster:       make([]Kmeans, classes),
+		cluster:       make([]Kmeans, layerDepth),
 	}
 
 	// make SpeechFrames for the speech patterns
@@ -1566,10 +1580,11 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 	}
 
 	layer++
-	// number of outer layer nodes
-	olnodes := classes
-	// include bias weight
-	nwgts = (layerDepth + 1) * olnodes
+	// outer layer nodes
+	olnodes := int(math.Ceil(math.Log2(float64(classes))))
+
+	// output layer weights
+	nwgts = layerDepth * olnodes
 	rbf.link[layer] = make([]Link, nwgts)
 
 	// Continue with output layer, one weight per line
@@ -1588,24 +1603,22 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 		return nil, fmt.Errorf("scanner error: %v", err)
 	}
 
-	// construct node, init node[i][0].y to 1.0 (bias)
+	// construct nodes
 	rbf.node = make([][]Node, hiddenLayers+2)
 
 	// input layer
 	rbf.node[0] = make([]Node, ilnodes)
 
-	// output layer, which has no bias node
+	// output layer
 	rbf.node[hiddenLayers+1] = make([]Node, olnodes)
 
 	// hidden layer
 	for i := 1; i <= hiddenLayers; i++ {
-		rbf.node[i] = make([]Node, layerDepth+1)
-		// set first node in the layer (bias) to 1
-		rbf.node[i][0].y = 1.0
+		rbf.node[i] = make([]Node, layerDepth)
 	}
 
 	// *********************************************************
-	// construct desired from classes, one-hot vector
+	// construct desired from classes
 	rbf.desired = make([]float64, olnodes)
 
 	// percent correct classification of speech patterns
@@ -1615,7 +1628,7 @@ func newTestingRBF(plot *PlotT) (*RBF, error) {
 	rbf.synSpeech = make([]float64, nsamples)
 
 	// K-means cluster data for centroids
-	for i := range classes {
+	for i := range layerDepth {
 		rbf.cluster[i].mean = make([]float64, classes)
 	}
 
@@ -2018,7 +2031,7 @@ func (rbf *RBF) processKmeansCluster() error {
 	// time starts at 0 and ends at number of centroids = classes
 	endpoints.xmin = 1.0
 	// max value of K in K-means cluster
-	endpoints.xmax = float64(classes)
+	endpoints.xmax = float64(rbf.layerDepth)
 	// endpoints for ymin and ymax found in call to getKmeansCluster above
 
 	// EP means endpoints
@@ -2154,6 +2167,12 @@ func newDisplayRBF(r *http.Request, plot *PlotT) (*RBF, error) {
 		return nil, fmt.Errorf("display parameters missing, should be 11, is %d", len(items))
 	}
 
+	layerDepth, err := strconv.Atoi(items[2])
+	if err != nil {
+		fmt.Printf("Conversion to int of %s error: %v\n", items[2], err)
+		return nil, err
+	}
+
 	fftSize, err := strconv.Atoi(items[5])
 	if err != nil {
 		fmt.Printf("Conversion to int of 'fftSize' error: %v\n", err)
@@ -2177,7 +2196,8 @@ func newDisplayRBF(r *http.Request, plot *PlotT) (*RBF, error) {
 		freqs:         make([]float64, maxSubFreq+1),
 		amps:          make([]float64, maxSubFreq+1),
 		delAmpl:       delAmpl,
-		cluster:       make([]Kmeans, classes),
+		cluster:       make([]Kmeans, layerDepth),
+		layerDepth:    layerDepth,
 	}
 
 	// Determine if time, K-means cluster, or spectrogram domain plot
@@ -2195,7 +2215,7 @@ func newDisplayRBF(r *http.Request, plot *PlotT) (*RBF, error) {
 	rbf.synSpeech = make([]float64, rbf.fftSize*nffts)
 
 	// K-means cluster data for centroids
-	for i := range classes {
+	for i := range layerDepth {
 		rbf.cluster[i].mean = make([]float64, classes)
 	}
 
