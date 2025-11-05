@@ -87,3 +87,12 @@ a good choice to classify the synthetic speech samples.
 <img width="1461" height="990" alt="image" src="https://github.com/user-attachments/assets/ad9c8bcb-3a54-472b-a679-f049d9abd18b" />
 <h4>K-means Cluster, Within-class Summed Square (WCSS/K-means), 0-128 clusters</h4>
 <img width="1460" height="990" alt="image" src="https://github.com/user-attachments/assets/3a0ef38b-9a26-4bac-b410-6da9755032d0" />
+<h4>Training Learning Curve, Mean-square Error,  64 clusters</h4>
+<img width="1462" height="993" alt="image" src="https://github.com/user-attachments/assets/537a284c-c5aa-4810-8319-e967386125a6" />
+<h4>Test Results, Percent correct versus pattern or class,  64 clusters</h4>
+<img width="1458" height="990" alt="image" src="https://github.com/user-attachments/assets/8292c15b-0144-40c7-87b4-5b47dadca440" />
+<img width="1454" height="681" alt="image" src="https://github.com/user-attachments/assets/a423d71b-e856-4610-b256-297aafd31dba" />
+
+
+
+
