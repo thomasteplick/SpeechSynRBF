@@ -73,7 +73,7 @@ func (cl *Cluster) updateCentroids(data [][]float64, centr int, dataLen int, cen
 }
 
 // Compute each cluster's standard deviation
-func (cl *Cluster) computerRBFstdev(ncentroids int, data [][]float64, dataLen int) {
+func (cl *Cluster) computeRBFstdev(ncentroids int, data [][]float64, dataLen int) {
 	// is data point in the this cluster
 
 	// loop over centroids/clusters
@@ -273,7 +273,7 @@ func Kmeans(ncentroids int, data [][]float64) error {
 	//kmc.computeRBFbandwidth(ncentroids)
 
 	// compute standard deviation for each cluster
-	kmc.computerRBFstdev(ncentroids, data, dataLen)
+	kmc.computeRBFstdev(ncentroids, data, dataLen)
 
 	// save to disk centroids, bandwidths, wcss
 	err = kmc.saveClusterData()
