@@ -643,6 +643,10 @@ func (rbf *RBF) getKmeansCluster(endpoints *Endpoints) error {
 			fmt.Printf("getKmeansCluster, len(items) = %d, should be %d\n", len(items), nffts+2)
 			return fmt.Errorf("getKmeansCluster, len(items) = %d, should be %d", len(items), nffts+2)
 		}
+		if n == rbf.layerDepth {
+			fmt.Printf("stored K-means != %d, check new, submit\n", rbf.layerDepth)
+			return fmt.Errorf("stored K-means != %d, check new, submit", rbf.layerDepth)
+		}
 		for i := range nffts {
 			bin, err := strconv.ParseFloat(items[i], 64)
 			if err != nil {
@@ -674,6 +678,10 @@ func (rbf *RBF) getKmeansCluster(endpoints *Endpoints) error {
 	if err = scanner.Err(); err != nil {
 		fmt.Printf("getKmeansCluster scanner error: %s\n", err.Error())
 		return fmt.Errorf("getKmeansCluster scanner error: %v", err)
+	}
+	if n < rbf.layerDepth {
+		fmt.Printf("stored K-means != %d, check new, submit\n", rbf.layerDepth)
+		return fmt.Errorf("stored K-means != %d, check new, submit", rbf.layerDepth)
 	}
 
 	return nil
@@ -2261,101 +2269,86 @@ func handleDisplayRBF(w http.ResponseWriter, r *http.Request) {
 		// a frame consists of avgDuration samples = 25ms of speech sampled at 8,000 Hz
 		nframes := int(math.Ceil(float64(nsamples) / float64(avgDuration)))
 
-		// create new synthetic speech patterns
-		newPattern := r.FormValue("newpattern")
-		if len(newPattern) > 0 {
-			if err = rbf.createPatterns(); err != nil {
-				fmt.Printf("createPatterns() error: %v\n", err)
-				plot.Status = fmt.Sprintf("createPatterns() error: %v", err.Error())
-				// Write to HTTP using template and grid
-				if err := tmplDisplayRBF.Execute(w, plot); err != nil {
-					log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-				}
-				return
+		files, err := os.ReadDir(dataDir)
+		if err != nil {
+			fmt.Printf("ReadDir %s error: %v\n", dataDir, err)
+			plot.Status = fmt.Sprintf("ReadDir %s error: %v", dataDir, err.Error())
+			// Write to HTTP using template and grid
+			if err := tmplDisplayRBF.Execute(w, plot); err != nil {
+				log.Fatalf("Write to HTTP output using template with error: %v\n", err)
 			}
-			// Read the synthetic speech patterns
+			return
+		}
+		if len(files) == 0 {
+			fmt.Printf("No synthetic speech files in %s\n", dataDir)
+			plot.Status = fmt.Sprintf("No synthetic speech files in %s, create new patterns", dataDir)
+			// Write to HTTP using template and grid
+			if err := tmplDisplayRBF.Execute(w, plot); err != nil {
+				log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+			}
+			return
 		} else {
-			files, err := os.ReadDir(dataDir)
-			if err != nil {
-				fmt.Printf("ReadDir %s error: %v\n", dataDir, err)
-				plot.Status = fmt.Sprintf("ReadDir %s error: %v", dataDir, err.Error())
-				// Write to HTTP using template and grid
-				if err := tmplDisplayRBF.Execute(w, plot); err != nil {
-					log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-				}
-				return
+			rbf.speechPat = make([][]SpeechFrame, classes)
+			for i := range rbf.speechPat {
+				rbf.speechPat[i] = make([]SpeechFrame, nframes)
 			}
-			if len(files) == 0 {
-				fmt.Printf("No synthetic speech files in %s\n", dataDir)
-				plot.Status = fmt.Sprintf("No synthetic speech files in %s, create new patterns", dataDir)
-				// Write to HTTP using template and grid
-				if err := tmplDisplayRBF.Execute(w, plot); err != nil {
-					log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-				}
-				return
-			} else {
-				rbf.speechPat = make([][]SpeechFrame, classes)
-				for i := range rbf.speechPat {
-					rbf.speechPat[i] = make([]SpeechFrame, nframes)
-				}
-				pattern := 0
-				// Retrieve the speech files
-				for _, dirEntry := range files {
-					name := dirEntry.Name()
-					if strings.Contains(name, "speech") && strings.Contains(name, "csv") {
-						fspeech, err := os.Open(filepath.Join(dataDir, name))
-						if err != nil {
-							fmt.Printf("Open %s error: %v\n", name, err)
-							plot.Status = fmt.Sprintf("Open %s error: %v", name, err.Error())
-							// Write to HTTP using template and grid
-							if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-								log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-							}
-							return
+			pattern := 0
+			// Retrieve the speech files
+			for _, dirEntry := range files {
+				name := dirEntry.Name()
+				if strings.Contains(name, "speech") && strings.Contains(name, "csv") {
+					fspeech, err := os.Open(filepath.Join(dataDir, name))
+					if err != nil {
+						fmt.Printf("Open %s error: %v\n", name, err)
+						plot.Status = fmt.Sprintf("Open %s error: %v", name, err.Error())
+						// Write to HTTP using template and grid
+						if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+							log.Fatalf("Write to HTTP output using template with error: %v\n", err)
 						}
-						scanner := bufio.NewScanner(fspeech)
-						frame := 0
-						for scanner.Scan() {
-							line := scanner.Text()
-							items := strings.Split(line, ",")
-							nfreqs := len(items) / 2
-							rbf.speechPat[pattern][frame].freqs = make([]float64, nfreqs)
-							rbf.speechPat[pattern][frame].amps = make([]float64, nfreqs)
-							for i := 0; i < nfreqs; i++ {
-								freq, err := strconv.ParseFloat(items[i], 64)
-								if err != nil {
-									plot.Status = fmt.Sprintf("freq %d conversion error: %v", i, err.Error())
-									// Write to HTTP using template and grid
-									if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-										log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-									}
-									return
-								}
-								ampl, err := strconv.ParseFloat(items[i+nfreqs], 64)
-								if err != nil {
-									plot.Status = fmt.Sprintf("ampl %d conversion error: %v", i, err.Error())
-									// Write to HTTP using template and grid
-									if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-										log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-									}
-									return
-								}
-								rbf.speechPat[pattern][frame].amps[i] = ampl
-								rbf.speechPat[pattern][frame].freqs[i] = freq
-							}
-							frame++
-						}
-						fspeech.Close()
-						if err = scanner.Err(); err != nil {
-							fmt.Printf("speech file scanner error: %s", err.Error())
-							// Write to HTTP using template and grid
-							if err := tmplTrainingRBF.Execute(w, plot); err != nil {
-								log.Fatalf("Write to HTTP output using template with error: %v\n", err)
-							}
-							return
-						}
-						pattern++
+						return
 					}
+					scanner := bufio.NewScanner(fspeech)
+					frame := 0
+					for scanner.Scan() {
+						line := scanner.Text()
+						items := strings.Split(line, ",")
+						nfreqs := len(items) / 2
+						rbf.speechPat[pattern][frame].freqs = make([]float64, nfreqs)
+						rbf.speechPat[pattern][frame].amps = make([]float64, nfreqs)
+						for i := 0; i < nfreqs; i++ {
+							freq, err := strconv.ParseFloat(items[i], 64)
+							if err != nil {
+								plot.Status = fmt.Sprintf("freq %d conversion error: %v", i, err.Error())
+								// Write to HTTP using template and grid
+								if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+									log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+								}
+								return
+							}
+							ampl, err := strconv.ParseFloat(items[i+nfreqs], 64)
+							if err != nil {
+								plot.Status = fmt.Sprintf("ampl %d conversion error: %v", i, err.Error())
+								// Write to HTTP using template and grid
+								if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+									log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+								}
+								return
+							}
+							rbf.speechPat[pattern][frame].amps[i] = ampl
+							rbf.speechPat[pattern][frame].freqs[i] = freq
+						}
+						frame++
+					}
+					fspeech.Close()
+					if err = scanner.Err(); err != nil {
+						fmt.Printf("speech file scanner error: %s", err.Error())
+						// Write to HTTP using template and grid
+						if err := tmplTrainingRBF.Execute(w, plot); err != nil {
+							log.Fatalf("Write to HTTP output using template with error: %v\n", err)
+						}
+						return
+					}
+					pattern++
 				}
 			}
 		}
